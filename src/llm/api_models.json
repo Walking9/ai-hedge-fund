@@ -1,5 +1,20 @@
 [
   {
+    "display_name": "gemini-3-flash-preview-free",
+    "model_name": "gemini-3-flash-preview-free",
+    "provider": "OpenAI"
+  },
+  {
+    "display_name": "gpt-5.5-free",
+    "model_name": "gpt-5.5-free",
+    "provider": "OpenAI"
+  },
+  {
+    "display_name": "minimax-m2.5:free",
+    "model_name": "minimax/minimax-m2.5:free",
+    "provider": "OpenAI"
+  },
+  {
     "display_name": "Grok 4.3",
     "model_name": "grok-4.3",
     "provider": "xAI"

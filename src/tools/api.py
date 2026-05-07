@@ -44,20 +44,28 @@ def _make_api_request(url: str, headers: dict, method: str = "GET", json_data: d
         Exception: If the request fails with a non-429 error
     """
     for attempt in range(max_retries + 1):  # +1 for initial attempt
-        if method.upper() == "POST":
-            response = requests.post(url, headers=headers, json=json_data)
-        else:
-            response = requests.get(url, headers=headers)
-        
-        if response.status_code == 429 and attempt < max_retries:
-            # Linear backoff: 60s, 90s, 120s, 150s...
-            delay = 60 + (30 * attempt)
-            print(f"Rate limited (429). Attempt {attempt + 1}/{max_retries + 1}. Waiting {delay}s before retrying...")
-            time.sleep(delay)
-            continue
-        
-        # Return the response (whether success, other errors, or final 429)
-        return response
+        try:
+            if method.upper() == "POST":
+                response = requests.post(url, headers=headers, json=json_data)
+            else:
+                response = requests.get(url, headers=headers)
+            
+            if response.status_code == 429 and attempt < max_retries:
+                # Linear backoff: 60s, 90s, 120s, 150s...
+                delay = 60 + (30 * attempt)
+                print(f"Rate limited (429). Attempt {attempt + 1}/{max_retries + 1}. Waiting {delay}s before retrying...")
+                time.sleep(delay)
+                continue
+            
+            # Return the response (whether success, other errors, or final 429)
+            return response
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries:
+                delay = 5 * (attempt + 1)
+                print(f"Request failed: {e}. Attempt {attempt + 1}/{max_retries + 1}. Waiting {delay}s before retrying...")
+                time.sleep(delay)
+                continue
+            raise
 
 
 def get_prices(ticker: str, start_date: str, end_date: str, api_key: str = None) -> list[Price]:
@@ -77,6 +85,23 @@ def get_prices(ticker: str, start_date: str, end_date: str, api_key: str = None)
 
     url = f"https://api.financialdatasets.ai/prices/?ticker={ticker}&interval=day&interval_multiplier=1&start_date={start_date}&end_date={end_date}"
     response = _make_api_request(url, headers)
+    
+    # Fallback for future date error (API might be in a different timezone)
+    if response.status_code == 400:
+        try:
+            error_data = response.json()
+            if "end_date must be today" in error_data.get("message", ""):
+                # Extract the valid date from the error message, e.g., "end_date must be today (2026-05-07) or older"
+                import re
+                match = re.search(r"\((\d{4}-\d{2}-\d{2})\)", error_data.get("message", ""))
+                if match:
+                    valid_end_date = match.group(1)
+                    print(f"Adjusting end_date from {end_date} to {valid_end_date} for {ticker} prices due to API timezone differences.")
+                    url = f"https://api.financialdatasets.ai/prices/?ticker={ticker}&interval=day&interval_multiplier=1&start_date={start_date}&end_date={valid_end_date}"
+                    response = _make_api_request(url, headers)
+        except Exception:
+            pass
+
     if response.status_code != 200:
         return []
 
@@ -318,24 +343,6 @@ def get_market_cap(
     api_key: str = None,
 ) -> float | None:
     """Fetch market cap from the API."""
-    # Check if end_date is today
-    if end_date == datetime.datetime.now().strftime("%Y-%m-%d"):
-        # Get the market cap from company facts API
-        headers = {}
-        financial_api_key = api_key or os.environ.get("FINANCIAL_DATASETS_API_KEY")
-        if financial_api_key:
-            headers["X-API-KEY"] = financial_api_key
-
-        url = f"https://api.financialdatasets.ai/company/facts/?ticker={ticker}"
-        response = _make_api_request(url, headers)
-        if response.status_code != 200:
-            print(f"Error fetching company facts: {ticker} - {response.status_code}")
-            return None
-
-        data = response.json()
-        response_model = CompanyFactsResponse(**data)
-        return response_model.company_facts.market_cap
-
     financial_metrics = get_financial_metrics(ticker, end_date, api_key=api_key)
     if not financial_metrics:
         return None
