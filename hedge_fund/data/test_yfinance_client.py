@@ -29,7 +29,8 @@ class FakeTicker:
     """Stands in for yfinance.Ticker and records every history() call."""
 
     def __init__(self, *, history=None, info=None, income=None, balance=None,
-                 cashflow=None, earnings_history=None, news=None, history_error=None):
+                 cashflow=None, earnings_history=None, earnings_dates=None,
+                 earnings_dates_error=None, news=None, history_error=None):
         self._history = history if history is not None else pd.DataFrame()
         self._history_error = history_error
         self.info = info or {}
@@ -38,6 +39,8 @@ class FakeTicker:
         self.quarterly_cashflow = cashflow if cashflow is not None else pd.DataFrame()
         self.income_stmt = self.balance_sheet = self.cashflow = pd.DataFrame()
         self.earnings_history = earnings_history if earnings_history is not None else pd.DataFrame()
+        self._earnings_dates = earnings_dates if earnings_dates is not None else pd.DataFrame()
+        self._earnings_dates_error = earnings_dates_error
         self.news = news or []
         self.history_calls: list[dict] = []
 
@@ -46,6 +49,11 @@ class FakeTicker:
         if self._history_error is not None:
             raise self._history_error
         return self._history
+
+    def get_earnings_dates(self, limit=12, offset=0):
+        if self._earnings_dates_error is not None:
+            raise self._earnings_dates_error
+        return self._earnings_dates
 
 
 def client_for(ticker: FakeTicker) -> YFinanceClient:
@@ -246,17 +254,94 @@ def test_unknown_ticker_has_no_metrics():
 # Earnings, facts, market cap, news, insiders
 # ---------------------------------------------------------------------------
 
-def test_earnings_history_derives_surprise_newest_first():
-    hist = pd.DataFrame(
-        {"EPS Estimate": [1.0, 1.0, 1.0], "EPS": [1.2, 0.8, 1.0]},
-        index=pd.DatetimeIndex(["2024-03-31", "2024-06-30", "2024-09-30"]),
+def quarters(*rows):
+    """Yahoo's earnings history, as yfinance returns it: indexed by fiscal
+    quarter end with epsActual / epsEstimate columns."""
+    return pd.DataFrame(
+        {"epsActual": [actual for _, actual, _ in rows],
+         "epsEstimate": [estimate for _, _, estimate in rows]},
+        index=pd.DatetimeIndex([quarter for quarter, _, _ in rows], name="quarter"),
     )
+
+
+def calendar(*rows):
+    """Yahoo's earnings calendar: (New York timestamp, actual, estimate, event type)."""
+    return pd.DataFrame(
+        {"EPS Estimate": [estimate for _, _, estimate, _ in rows],
+         "Reported EPS": [actual for _, actual, _, _ in rows],
+         "Surprise(%)": [None] * len(rows),
+         "Event Type": [kind for _, _, _, kind in rows]},
+        index=pd.DatetimeIndex([stamp for stamp, _, _, _ in rows], name="Earnings Date")
+        .tz_localize("America/New_York"),
+    )
+
+
+def test_earnings_history_derives_surprise_newest_first():
+    hist = quarters(("2024-03-31", 1.2, 1.0), ("2024-06-30", 0.8, 1.0), ("2024-09-30", 1.0, 1.0))
     records = client_for(FakeTicker(earnings_history=hist)).get_earnings_history("AAPL")
     assert [r.report_period for r in records] == ["2024-09-30", "2024-06-30", "2024-03-31"]
     assert [r.quarterly.eps_surprise for r in records] == ["MEET", "MISS", "BEAT"]
-    assert records[0].source_type == "10-Q"
+    assert {r.source_type for r in records} == {"10-Q"}  # no calendar: statutory rows only
     assert records[0].filing_date == "2024-11-09"
+    assert records[0].quarterly.earnings_per_share == 1.0
     assert records[0].quarterly.estimated_earnings_per_share == 1.0
+
+
+def test_announcements_become_8k_rows():
+    hist = quarters(("2024-06-30", 0.8, 1.0), ("2024-09-30", 1.2, 1.0))
+    cal = calendar(
+        ("2025-01-30 16:30", None, 1.1, "Earnings"),   # upcoming: no actual yet
+        ("2024-10-31 16:30", 1.2, 1.0, "Earnings"),    # released after the close
+        ("2024-10-31 17:00", 1.2, 1.0, "Call"),        # the call, same day
+        ("2024-08-01 08:00", 0.8, 1.0, "Earnings"),    # released before the open
+        ("2024-07-15 10:00", 0.8, 1.0, "Meeting"),     # shareholder meeting
+    )
+    records = client_for(FakeTicker(earnings_history=hist, earnings_dates=cal)).get_earnings_history("AAPL")
+    eightk = [r for r in records if r.source_type == "8-K"]
+    assert [(r.report_period, r.filing_date, r.filing_window, r.quarterly.eps_surprise) for r in eightk] == [
+        ("2024-09-30", "2024-11-01", "after_close", "BEAT"),   # rolls to the next day
+        ("2024-06-30", "2024-08-01", "before_open", "MISS"),
+    ]
+    assert eightk[0].filing_datetime.startswith("2024-10-31T16:30")
+    # The statutory rows survive as same-quarter siblings, listed after the 8-K.
+    assert [r.source_type for r in records] == ["8-K", "10-Q", "8-K", "10-Q"]
+
+
+def test_old_announcement_matches_an_extrapolated_quarter():
+    hist = quarters(("2024-09-30", 1.2, 1.0))
+    cal = calendar(("2024-05-02 16:30", 1.1, 1.0, "Earnings"))
+    records = client_for(FakeTicker(earnings_history=hist, earnings_dates=cal)).get_earnings_history("AAPL")
+    eightk = [r for r in records if r.source_type == "8-K"]
+    assert (eightk[0].report_period, eightk[0].filing_date) == ("2024-03-31", "2024-05-03")
+
+
+def test_announcement_without_history_uses_the_calendar_quarter():
+    cal = calendar(("2024-10-31 16:30", 1.2, 1.0, "Earnings"))
+    records = client_for(FakeTicker(earnings_dates=cal)).get_earnings_history("AAPL")
+    assert [(r.source_type, r.report_period) for r in records] == [("8-K", "2024-09-30")]
+
+
+def test_calendar_unavailable_keeps_the_statutory_rows():
+    hist = quarters(("2024-09-30", 1.2, 1.0))
+    t = FakeTicker(earnings_history=hist,
+                   earnings_dates_error=ImportError("Missing optional dependency 'lxml'"))
+    records = client_for(t).get_earnings_history("AAPL")
+    assert [r.source_type for r in records] == ["10-Q"]
+
+
+def test_pead_forms_a_view_on_a_yahoo_announcement():
+    """End to end: with announcement dates, PEAD's announcement-only default
+    fires on the first session after a beat and goes quiet when the drift
+    window closes."""
+    from hedge_fund.signals import PEADModel
+    hist = quarters(("2024-06-30", 0.8, 1.0), ("2024-09-30", 1.2, 1.0))
+    cal = calendar(("2024-10-31 16:30", 1.2, 1.0, "Earnings"))
+    client = client_for(FakeTicker(earnings_history=hist, earnings_dates=cal))
+    model = PEADModel()
+    assert model.predict("AAPL", "2024-10-30", client).value == 0.0   # not announced yet
+    assert model.predict("AAPL", "2024-11-01", client).value == 1.0   # first tradeable session
+    assert model.predict("AAPL", "2024-11-04", client).value == 1.0   # inside the 4-day window
+    assert model.predict("AAPL", "2024-11-12", client).value == 0.0   # drift window over
 
 
 def test_surprise_boundaries():

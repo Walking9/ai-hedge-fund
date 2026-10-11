@@ -53,5 +53,10 @@
     "display_name": "Kimi K2.7 Code (AiHubmix)",
     "model_name": "kimi-k2.7-code",
     "provider": "OpenAI"
+  },
+  {
+    "display_name": "coding-minimax-m3-free (AiHubmix)",
+    "model_name": "coding-minimax-m3-free",
+    "provider": "OpenAI"
   }
 ]

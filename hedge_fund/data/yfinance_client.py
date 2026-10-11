@@ -36,16 +36,15 @@ Coverage vs Financial Datasets:
 - Fundamentals: ~4-5 quarters or 4-5 years of Yahoo's free statements. The
   snapshot needs 4 filed periods, so an LLM agent abstains more readily here
   than on the paid source, most visibly just before a filing.
-- Earnings: EPS actual vs. estimate with a derived BEAT/MISS/MEET label.
+- Earnings: one "8-K" row per announcement from Yahoo's earnings calendar
+  (a US issuer's results release is an 8-K), dated to the first session that
+  could trade on it, plus one estimated "10-Q" row per quarter; EPS actual
+  vs. consensus with a derived BEAT/MISS/MEET label on both. The calendar
+  needs the optional ``lxml`` package; without it only the 10-Q rows exist
+  and PEAD's announcement-only default forms no view.
 - Company facts: name, sector, industry, exchange, location (no CIK/SIC).
 - News: recent Yahoo headlines only.
 - Insider trades: NOT available — returns [] (the protocol's "no data").
-
-PEAD note: PEADModel defaults to ``announcement_only=True``, which accepts only
-8-K rows. Yahoo carries no 8-K data, so PEAD forms no view on this provider
-unless it is constructed with ``announcement_only=False``, where it fires on the
-estimated 10-Q filing date — a lagged proxy for the announcement, not the
-announcement itself.
 """
 
 from __future__ import annotations
@@ -675,36 +674,48 @@ class YFinanceClient:
         ticker: str,
         limit: int = 12,
     ) -> list[EarningsRecord]:
-        """Reported quarters as EarningsRecords, newest first.
+        """Earnings events as EarningsRecords, newest first.
 
-        Yahoo indexes this by fiscal period end and carries the consensus EPS
-        estimate alongside the actual, so ``eps_surprise`` is derived here
-        (BEAT / MISS / MEET) — it is what PEAD keys off. ``source_type`` is
-        "10-Q" and ``filing_date`` is the estimated filing date (see the module
-        docstring); Yahoo has no 8-K announcement dates, so PEAD's
-        announcement-only default finds nothing on this provider.
+        Two kinds of row, mirroring the paid source's "one record per filing":
+
+        - ``8-K``: one per earnings *announcement*, from Yahoo's earnings
+          calendar. A US issuer's results release is filed as an 8-K (Item
+          2.02), so the announcement date is the 8-K date — the event PEAD and
+          the event study are built around. ``filing_date`` is the first
+          session that could trade on the news (an after-close release rolls
+          to the next calendar day); ``filing_datetime`` keeps the exact
+          timestamp and ``filing_window`` says before_open / during_market /
+          after_close.
+        - ``10-Q``: one per reported fiscal quarter, dated by the statutory
+          deadline (quarter end + 40 days). The fallback when the calendar is
+          unavailable, and the same-quarter sibling that PEAD de-prioritises
+          when an 8-K row exists.
+
+        ``eps_surprise`` is derived from actual vs. consensus EPS on both.
+        ``report_period`` for an announcement is the latest fiscal quarter end
+        at or before it (see _quarter_end_before for how older announcements
+        are matched).
         """
-        try:
-            hist = self._ticker(ticker).earnings_history
-        except Exception as exc:  # noqa: BLE001 - no earnings is a data fact
-            logger.debug("yfinance earnings history unavailable for %s: %s", ticker, exc)
-            return []
-        if hist is None or getattr(hist, "empty", True):
-            return []
-
-        delay = timedelta(days=_FILING_DELAY_DAYS["quarterly"])
+        quarters = self._reported_quarters(ticker)
+        quarter_ends = [quarter_end for quarter_end, _, _ in quarters]
         records: list[EarningsRecord] = []
-        for idx, row in hist.iterrows():
-            report_period = self._day(idx)
-            actual = self._safe(row.get("EPS"))
-            if actual is None:
-                actual = self._safe(row.get("Reported EPS"))
-            estimate = self._safe(row.get("EPS Estimate"))
+        seen_days: set[str] = set()
+
+        for announced_at, actual, estimate in self._announcements(ticker, limit):
+            event_day = self._event_day(announced_at)
+            if event_day in seen_days:
+                continue  # Yahoo lists the call and the release separately
+            report_period = self._quarter_end_before(quarter_ends, event_day)
+            if report_period is None:
+                continue
+            seen_days.add(event_day)
             records.append(EarningsRecord(
                 ticker=ticker,
                 report_period=report_period,
-                source_type="10-Q",
-                filing_date=(pd.Timestamp(idx) + delay).strftime("%Y-%m-%d"),
+                source_type="8-K",
+                filing_date=event_day,
+                filing_datetime=announced_at.isoformat(),
+                filing_window=self._filing_window(announced_at),
                 quarterly=EarningsData(
                     earnings_per_share=actual,
                     estimated_earnings_per_share=estimate,
@@ -712,8 +723,144 @@ class YFinanceClient:
                 ),
             ))
 
-        records.sort(key=lambda r: r.report_period, reverse=True)
+        delay = timedelta(days=_FILING_DELAY_DAYS["quarterly"])
+        for quarter_end, actual, estimate in quarters:
+            records.append(EarningsRecord(
+                ticker=ticker,
+                report_period=self._day(quarter_end),
+                source_type="10-Q",
+                filing_date=(quarter_end + delay).strftime("%Y-%m-%d"),
+                quarterly=EarningsData(
+                    earnings_per_share=actual,
+                    estimated_earnings_per_share=estimate,
+                    eps_surprise=_surprise(actual, estimate),
+                ),
+            ))
+
+        # Newest quarter first; within a quarter the announcement (8-K) ahead
+        # of the statutory filing (10-Q), so a small limit keeps the rows PEAD
+        # actually uses.
+        records.sort(key=lambda r: (r.report_period, r.source_type == "8-K"), reverse=True)
         return records[:limit]
+
+    def _reported_quarters(self, ticker: str) -> list[tuple[pd.Timestamp, float | None, float | None]]:
+        """(fiscal quarter end, actual EPS, consensus EPS) per reported
+        quarter, oldest first, from Yahoo's earnings history.
+
+        Yahoo's columns are ``epsActual`` / ``epsEstimate``; older yfinance
+        releases used display names, which are accepted as fallbacks.
+        """
+        try:
+            hist = self._ticker(ticker).earnings_history
+        except Exception as exc:  # noqa: BLE001 - no history is a data fact
+            logger.debug("yfinance earnings history unavailable for %s: %s", ticker, exc)
+            return []
+        if hist is None or getattr(hist, "empty", True):
+            return []
+        quarters = []
+        for idx, row in hist.iterrows():
+            quarters.append((
+                pd.Timestamp(idx).normalize(),
+                self._first_number(row, "epsActual", "Reported EPS", "EPS"),
+                self._first_number(row, "epsEstimate", "EPS Estimate"),
+            ))
+        quarters.sort(key=lambda quarter: quarter[0])
+        return quarters
+
+    def _announcements(self, ticker: str, limit: int) -> list[tuple[pd.Timestamp, float, float | None]]:
+        """Past earnings announcements as (timestamp, actual EPS, consensus
+        EPS), oldest first, from Yahoo's earnings calendar.
+
+        Upcoming events (no actual yet) and shareholder meetings are dropped.
+        An unavailable calendar — yfinance needs the optional ``lxml``
+        package for it — degrades to [] with a warning: PEAD then sees only
+        the estimated 10-Q rows and, in its announcement-only default, forms
+        no view.
+        """
+        try:
+            frame = self._ticker(ticker).get_earnings_dates(limit=min(100, limit + 8))
+        except Exception as exc:  # noqa: BLE001 - optional dependency / scrape failure
+            logger.warning(
+                "yfinance earnings calendar unavailable for %s (%s); "
+                "PEAD will see estimated 10-Q rows only", ticker, exc,
+            )
+            return []
+        if frame is None or getattr(frame, "empty", True):
+            return []
+        announcements = []
+        for idx, row in frame.iterrows():
+            kind = row.get("Event Type")
+            if kind is not None and str(kind) in ("Meeting", "11"):
+                continue
+            actual = self._first_number(row, "Reported EPS", "epsActual")
+            if actual is None:
+                continue  # not reported yet
+            announcements.append((
+                pd.Timestamp(idx),
+                actual,
+                self._first_number(row, "EPS Estimate", "epsEstimate"),
+            ))
+        # Oldest first: when the release and the earnings call share a day,
+        # the earlier timestamp is the release, and get_earnings_history
+        # keeps the first event it sees for a day.
+        announcements.sort(key=lambda announcement: announcement[0])
+        return announcements
+
+    def _first_number(self, row, *keys) -> float | None:
+        """The first of *keys* present on *row* as a finite number."""
+        for key in keys:
+            value = self._safe(row.get(key))
+            if value is not None:
+                return value
+        return None
+
+    @staticmethod
+    def _event_day(announced_at: pd.Timestamp) -> str:
+        """The first session that could trade on a release: the same day for a
+        pre-open or intraday release, the next calendar day after the close.
+        Weekends are left to the consumers (PEAD's window and the event
+        study's snap both handle them)."""
+        ts = pd.Timestamp(announced_at)
+        if ts.hour >= 16:
+            ts = ts + timedelta(days=1)
+        return ts.strftime("%Y-%m-%d")
+
+    @staticmethod
+    def _filing_window(announced_at: pd.Timestamp) -> str:
+        ts = pd.Timestamp(announced_at)
+        if ts.hour >= 16:
+            return "after_close"
+        if (ts.hour, ts.minute) < (9, 30):
+            return "before_open"
+        return "during_market"
+
+    @staticmethod
+    def _quarter_end_before(quarter_ends: list, event_day: str) -> str | None:
+        """The latest fiscal quarter end at or before *event_day*.
+
+        Known quarter ends come first. For an announcement older than the
+        known history, the issuer's own cadence is extended backwards in
+        three-month steps; with no history at all the calendar quarter end is
+        used. Both are approximations of the fiscal calendar — PEAD's 45-day
+        lag filter drops any row they get badly wrong.
+        """
+        day = pd.Timestamp(event_day).normalize()
+        known = sorted({pd.Timestamp(q).normalize() for q in quarter_ends})
+        eligible = [q for q in known if q <= day]
+        if eligible:
+            return eligible[-1].strftime("%Y-%m-%d")
+        if known:
+            # Step back a quarter at a time. A month-end cadence must stay on
+            # month ends (DateOffset would turn 06-30 into 03-30); other
+            # fiscal calendars keep their day of month.
+            step = pd.offsets.MonthEnd(3) if known[0].is_month_end else pd.DateOffset(months=3)
+            candidate = known[0]
+            for _ in range(80):  # twenty years back, bounded
+                candidate = candidate - step
+                if candidate <= day:
+                    return candidate.strftime("%Y-%m-%d")
+            return None
+        return pd.offsets.QuarterEnd().rollback(day).strftime("%Y-%m-%d")
 
     # ------------------------------------------------------------------
     # Market cap
