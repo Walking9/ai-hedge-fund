@@ -4,7 +4,7 @@ Wraps any DataClient with a JSON file cache under ~/.hedge-fund/cache/data/. A w
 cache reuses completed historical responses. Daily prices are reusable only
 when fetched after the requested end date has ended in New York.
 
-    fd = CachedDataClient(FDClient())
+    fd = CachedDataClient(make_data_client())
     prices = fd.get_prices("AAPL", "2024-01-01", "2024-12-31")  # API call
     prices = fd.get_prices("AAPL", "2024-01-01", "2024-12-31")  # disk, ~0ms
 

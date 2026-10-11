@@ -43,5 +43,15 @@
     "display_name": "Gemini 3.8 Flash",
     "model_name": "gemini-3.8-flash",
     "provider": "Google"
+  },
+  {
+    "display_name": "Kimi K3 Code (AiHubmix)",
+    "model_name": "coding-kimi-k3-free",
+    "provider": "OpenAI"
+  },
+  {
+    "display_name": "Kimi K2.7 Code (AiHubmix)",
+    "model_name": "kimi-k2.7-code",
+    "provider": "OpenAI"
   }
 ]

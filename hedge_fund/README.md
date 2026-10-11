@@ -47,9 +47,12 @@ made at session T's close is executed at T+1's close, in both modes.
 ```bash
 poetry install                          # dependencies
 
+# Market data comes from Yahoo Finance (yfinance) by default — no key needed.
 # .env needs (at repo root):
-#   FINANCIAL_DATASETS_API_KEY=...      # market/fundamentals data
 #   ANTHROPIC_API_KEY=...               # only for LLM agents (Buffett)
+# Optional, to use the paid Financial Datasets API instead:
+#   HEDGE_FUND_DATA_PROVIDER=financialdatasets
+#   FINANCIAL_DATASETS_API_KEY=...
 
 # THE command. No arguments: launch the interactive app (a Textual TUI).
 # Two modes: paper trading (your funds — run the next session behind an
@@ -109,7 +112,7 @@ Data (point-in-time) → Alpha models → Portfolio → Risk → Execution → L
 
 | Module | What | Status |
 |--------|------|--------|
-| `data/` | `DataClient` protocol, Financial Datasets client, disk cache | ✅ |
+| `data/` | `DataClient` protocol, Yahoo Finance client (yfinance, default) and Financial Datasets client, disk cache | ✅ |
 | `signals/` | `AlphaModel` interface, PEAD, `LLMAgent` + 5 investor personas | ✅ |
 | `llm/` | LLM provider protocol, Anthropic client, prompt cache | ✅ |
 | `features/` | Point-in-time fundamentals snapshot (more features planned) | ◐ |
