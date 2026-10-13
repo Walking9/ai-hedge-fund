@@ -403,7 +403,9 @@ class YFinanceClient:
                 continue  # not public yet as of end_date
 
             def row_val(df, key):
-                if df is None or df.empty or key not in df.index:
+                # The three statements do not always cover the same quarters;
+                # a period missing from one leaves that field None.
+                if df is None or df.empty or key not in df.index or col not in df.columns:
                     return None
                 return self._safe(df.loc[key, col])
 

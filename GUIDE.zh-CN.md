@@ -117,8 +117,13 @@ poetry run aihf
 ### 4.2 命令行回测
 
 ```bash
+poetry run aihf backtest ~/.hedge-fund/mandates/broad-growth.yaml  \
+    --universe AAPL,MSFT,NVDA,GOOGL,AMZN,META,TSLA,AMD,AVGO,QCOM,CRM,ADBE,ORCL,IBM,INTC --start 2026-06-12 --end 2026-10-10
+
 poetry run aihf backtest ~/.hedge-fund/mandates/example.yaml \
-    --universe AAPL,MSFT,NVDA --start 2026-05-12 --end 2026-10-10
+    --universe NVDA,GOOGL,AMZN,TSLA,AMD \
+    --start 2025-09-30 \
+    --end 2026-10-10
 ```
 
 | 参数 | 说明 |
@@ -139,13 +144,13 @@ stdout 输出完整结果 JSON，stderr 输出一行汇总，`research/` 下自�
 ```bash
 # 部署：模版 + 股票池 → 一支基金
 poetry run aihf paper create alpha --mandate ~/.hedge-fund/mandates/example.yaml --universe AAPL,MSFT
-
+poetry run aihf paper create 20sister --mandate ~/.hedge-fund/mandates/broad-growth.yaml --universe AAAPL,MSFT,NVDA,GOOGL,AMZN,META,TSLA,AMD,AVGO,QCOM,CRM,ADBE,ORCL,IBM,INTC
 # 每个收盘后推进一个交易日（幂等、不跳日，可以放 cron）
-poetry run aihf paper tick alpha
+poetry run aihf paper tick 20sister
 poetry run aihf paper tick alpha --again       # 重跑最近一天，旧记录移入 ledger/superseded/
 poetry run aihf paper tick alpha --session 2026-10-09   # 显式指定要记录的那一天
 
-poetry run aihf paper status alpha               # 净值、最近交易日、待执行决策、是否停止
+poetry run aihf paper status 20sister               # 净值、最近交易日、待执行决策、是否停止
 poetry run aihf paper list                       # 所有已部署基金
 poetry run aihf paper halt alpha --reason "人工复核"   # 紧急停止，之后 tick 拒绝交易
 poetry run aihf paper resume alpha               # 解除
@@ -247,7 +252,7 @@ final_weights    风控后的最终目标仓位
 ```bash
 poetry run python - <<'PY'
 import json, glob, os
-p = max(glob.glob(os.path.expanduser("~/.hedge-fund/research/*.json")), key=os.path.getmtime)
+p = max(glob.glob(os.path.expanduser("~/.hedge-fund/research/example-fund-2025-09-30-2026-10-09-20261013-235121.json")), key=os.path.getmtime)
 d = json.load(open(p))
 print(p)
 print(d["fund"], d["start"], "→", d["end"], "|", d["rebalance"], "vs", d["benchmark"], "|", d["universe"])
@@ -274,7 +279,7 @@ PY
 ```bash
 poetry run python - <<'PY'
 import json, glob, os
-p = max(glob.glob(os.path.expanduser("~/.hedge-fund/research/*.json")), key=os.path.getmtime)
+p = max(glob.glob(os.path.expanduser("~/.hedge-fund/research/example-fund-2025-09-30-2026-10-09-20261013-235121.json")), key=os.path.getmtime)
 for r in json.load(open(p))["records"]:
     ex = r.get("executed")
     if not ex or not ex["fills"]:
@@ -335,7 +340,7 @@ PY
 
 ### 5.4 模拟盘：命令行怎么看
 
-**`aihf paper status alpha`** 打印一行状态加两段明细：
+**` poetry run aihf paper status 7sister_IBKR`** 打印一行状态加两段明细：
 
 ```
 alpha              example-fund  ·  AAPL MSFT  ·  weekly  ·  3 sessions  ·  last 2026-10-09  ·  NAV $100,000.00 (+0.00%)
@@ -350,9 +355,9 @@ alpha              example-fund  ·  AAPL MSFT  ·  weekly  ·  3 sessions  ·  
 - `pending decision`：最近一次决策的目标权重，**下一个收盘才会成交**。
 - `book`：当前持仓股数与最近标记价。
 
-**`aihf paper list`** 对每支基金各打一行同样格式的状态。
+**`poetry run aihf paper list`** 对每支基金各打一行同样格式的状态。
 
-**`aihf paper tick alpha`** 成功时 stdout 输出这一天完整的 SessionRecord JSON（结构与第 5.2 节 `records[]` 的一条完全相同），stderr 一行汇总，有三种：
+**`poetry run aihf paper tick alpha`** 成功时 stdout 输出这一天完整的 SessionRecord JSON（结构与第 5.2 节 `records[]` 的一条完全相同），stderr 一行汇总，有三种：
 
 | 汇总 | 含义 |
 |------|------|
@@ -462,15 +467,16 @@ benchmark: SPY                # 基准，同时决定回测的交易日历
 
 - **模版不含股票**。股票池在回测或部署时用 `--universe` 给出，同一模版可以指向任何股票。
 - `blend.mode` 三选一：`long_only` 只做多、`long_short` 可做空、`dollar_neutral` 多空美元中性。做空想法必须由声明支持做空的分析师提出（pead、druckenmiller 等）。
-- `models[].params` 会**原样传给模型的构造函数**。例如给 pead 开启备用模式：
+- `models[].params` 会**原样传给模型的构造函数**。例如放宽 pead 的信号窗口（默认 4 天，公告后漂移只在窗口内出观点）：
 
   ```yaml
   models:
     - name: pead
-      params: {announcement_only: false}
+      params: {signal_window_days: 10}
   ```
 
 - 现成的策略库在 `hedge_fund/strategies/`：`fundamental-ls`、`deep-value`、`inflections`、`earnings-drift`，可以直接引用或照着写。
+- 随附的第二个模版在 `~/.hedge-fund/mandates/broad-growth.yaml`：单票上限放宽到 0.35，并注释了推荐的 12~20 只宽股票池，改动依据见第 7 节对照二。
 - 未知字段会被拒绝，写错会在启动前报错并指出位置。
 
 ---
@@ -513,6 +519,114 @@ return +2.82% vs SPY +5.47% · sharpe 0.87 · max drawdown 2.71%
 
 跑输基准的原因也能从信号里直接读出来：graham、munger 对 AAPL 持续看空，buffett 中性，而 deep-value 是**只做多**策略，看空只能等于不持有；三位里只有 buffett、munger 对 NVDA 看多，于是全部多头观点集中在一只股票上，又被 `max_position_pct: 0.25` 压在四分之一仓位；占 40% 资金的 earnings-drift 策略因当时 pead 还没有 8-K 数据而全程中性（Yahoo 财报日历接入后 pead 会在公告次日出观点，清缓存重跑结果会不同）。四分之三的钱趴在现金上，涨幅自然追不上满仓的 SPY。这不是数据问题，是这份模版在这段行情下的真实表现。
 
+### 对照二：低投入导致的跑输（按投入资金算，选股其实赢了）
+
+同一模版换成宽一点的股票池、更长的窗口：
+
+```
+example-fund 2025-09-30 → 2026-10-09 · 259 sessions · 54 rebalances · 31 orders
+return +6.33% vs SPY +16.87% · sharpe 1.00 · max drawdown 2.79%
+```
+
+用下面的归因脚本读它：
+
+- **钱没投出去。** 平均投入只有 15.9%，259 个交易日里只有 120 天有持仓；空仓的前四周 SPY +3.13%，基金 0。
+- **但选股是赢的。** 持仓期基金 +6.33% vs SPY +13.32%，而那是平均约两成仓位下的成绩；收益除以平均投入，投入资金的回报粗算约 40%，是 SPY 的两倍多。这个对比说明问题在仓位结构，不在判断质量。
+- **风控上限在替分析师做决定。** 54 次调仓触发 30 次削仓：NVDA 从 60% 削到 25% 出现 8 次，最高一次从 76% 削到 25%。
+- **前半年分析师集体弃权。** `only 1~3 filed periods (need 4)` 大量出现，约 2026 年 5 月后才够 4 期；窗口起点（2025-09-30）对免费数据太早。
+- **AMD 全区间 +290%，基金一股没买。** 前 32 个决策日弃权（数据不够），之后 22 个决策日三位分析师全部看空，格雷厄姆的理由是"134 倍市盈率配 2% 的 ROE，这个价格资本化的是希望而不是已被证明的盈利能力"。按价值标准没错，但这是动量股：**人格与股票池错配**，只做多策略里"看空"等于空仓。
+- **pead 这次真正工作了。** 14 条以上带 8-K 依据的观点，包括 2025-10-27 对 TSLA 的一次做空（MISS，事后 TSLA 全区间 -14.8%，方向正确）。
+- 据此的两个结构性改动（放宽上限到 0.35、股票池扩到 12~20 只）已写进 `~/.hedge-fund/mandates/broad-growth.yaml`。
+
+**归因脚本。** 自动取 `research/` 里最新的一份结果，回答四个问题：钱投出去了吗、风控削了多少、选股对不对、哪条策略在空转。
+
+```bash
+poetry run python - <<'PY'
+"""回测归因：投入比例、风控削仓、成交、个股走势、pead 观点、弃权、分段。"""
+import collections, glob, json, os, re
+
+path = max(glob.glob(os.path.expanduser("~/.hedge-fund/research/*.json")), key=os.path.getmtime)
+data = json.load(open(path))
+records, dates, m = data["records"], data["dates"], data["metrics"]
+print(path)
+print(f"{data['fund']} {data['start']}→{data['end']} | {data['rebalance']} vs {data['benchmark']} | {data['universe']}")
+print(f"sessions={len(dates)} cycles={m['n_cycles']} orders={m['n_orders']} "
+      f"return={m['total_return_pct']:+.2%} bench={m['benchmark_return_pct']:+.2%} "
+      f"sharpe={m['sharpe_ratio']:.2f} maxdd={m['max_drawdown_pct']:.2%}")
+
+nav = {r["session"]: r["nav"] for r in records}
+spy = {r["session"]: r["benchmark_close"] for r in records}
+ret = lambda series, a, b: series[b] / series[a] - 1
+
+# 1) 钱投出去了吗
+invested = [sum(abs(s) * r["marks"][t] for t, s in r["positions"].items()) / r["nav"]
+            if r["positions"] else 0.0 for r in records]
+print(f"\n平均投入 {sum(invested)/len(invested):.1%} | 最大 {max(invested):.1%} | "
+      f"有持仓交易日 {sum(1 for x in invested if x > 0)}/{len(invested)}")
+
+# 2) 风控削了多少
+clamps = collections.Counter()
+for r in records:
+    for c in (r.get("decision") or {}).get("clamps", []):
+        clamps[(c.get("limit"), c.get("ticker"), round(c.get("before", 0), 2), round(c.get("after", 0), 2))] += 1
+print("\n风控削仓:")
+for key, n in clamps.most_common(10):
+    print(f"  {n:3d}x {key}")
+
+# 3) 成交与首笔成交日
+fills = collections.Counter()
+first_fill = next((r["session"] for r in records if (r.get("executed") or {}).get("fills")), None)
+for r in records:
+    for f in (r.get("executed") or {}).get("fills", []):
+        fills[(f["side"], f["ticker"])] += 1
+print(f"\n首笔成交日: {first_fill}")
+for key, n in sorted(fills.items()):
+    print(f"  {n:3d}x {key[0]} {key[1]}")
+
+# 4) 个股走势（决策日标记价，全区间）
+marks = {r["session"]: r["decision"]["marks"] for r in records if r.get("decision")}
+print("\n个股走势（决策日标记价，全区间）:")
+for t in data["universe"]:
+    series = {d: v[t] for d, v in marks.items() if t in v}
+    days = sorted(series)
+    if days:
+        print(f"  {t}: {series[days[-1]] / series[days[0]] - 1:+.2%}")
+
+# 5) pead 观点
+views = [(r["session"], g["ticker"], g["value"], (g.get("reasoning") or "")[:60])
+         for r in records for st in (r.get("decision") or {}).get("strategies", [])
+         for g in st["signals"] if g["model_name"] == "pead" and g["value"] != 0]
+print(f"\npead 观点 {len(views)} 条:")
+for row in views[:10]:
+    print("  ", row)
+
+# 6) 弃权统计（把"股票 as of 日期"剥掉再合并计数）
+reasons = collections.Counter()
+for r in records:
+    for st in (r.get("decision") or {}).get("strategies", []):
+        for g in st["signals"]:
+            md = g.get("metadata") or {}
+            if md.get("abstained"):
+                why = re.sub(r"\S+ as of \d{4}-\d{2}-\d{2}: ", "", md.get("abstain_reason") or "")
+                reasons[(g["model_name"], why[:60])] += 1
+print("\n弃权统计:")
+for key, n in reasons.most_common(8):
+    print(f"  {n:3d}x {key}")
+
+# 7) 分段：空仓期 / 持仓期，以及按投入资金的粗算
+print("\n分段:")
+print(f"  SPY 全程 {dates[0]}→{dates[-1]}: {ret(spy, dates[0], dates[-1]):+.2%}")
+if first_fill:
+    print(f"  基金 空仓期 {dates[0]}→{first_fill}: {ret(nav, dates[0], first_fill):+.2%} | "
+          f"SPY: {ret(spy, dates[0], first_fill):+.2%}")
+    print(f"  基金 持仓期 {first_fill}→{dates[-1]}: {ret(nav, first_fill, dates[-1]):+.2%} | "
+          f"SPY: {ret(spy, first_fill, dates[-1]):+.2%}")
+    avg = sum(invested) / len(invested)
+    if avg > 0:
+        print(f"  投入资金回报粗算: {m['total_return_pct'] / avg:+.0%}（收益 ÷ 平均投入，仅作量级参考）")
+PY
+```
+
 ---
 
 ## 8. Yahoo Finance 免费源的能力边界
@@ -542,9 +656,12 @@ return +2.82% vs SPY +5.47% · sharpe 0.87 · max drawdown 2.71%
 **路径一：直接做模拟盘（最推荐）。** 模拟盘的"当前日期"就是今天，Yahoo 的 4~5 个季度全部已申报，LLM 分析师有足够数据，能正常给观点。这是免费源最合适的用法。
 
 ```bash
-poetry run aihf paper create alpha --mandate ~/.hedge-fund/mandates/example.yaml --universe AAPL,MSFT
+poetry run aihf paper create alpha --mandate ~/.hedge-fund/mandates/example_daily.yaml --universe AAPL,MSFT
+poetry run aihf paper create 7sister_IBKR_daily --mandate ~/.hedge-fund/mandates/example_daily.yaml --universe AAPL,MSFT,NVDA,GOOGL,AMZN,META,TSLA,AMD,AVGO,QCOM
+
 # 让 alpha 模拟盘执行一次当前的行情获取、信号生成与调仓指令
 poetry run aihf paper tick alpha
+poetry run aihf paper tick 7sister_IBKR
 ```
 
 **路径二：回测只用最近几个月的窗口。** 先查当前对某只股票能看到哪些申报期：

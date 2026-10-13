@@ -250,6 +250,20 @@ def test_unknown_ticker_has_no_metrics():
     assert client_for(FakeTicker()).get_financial_metrics("ZZZZ", "2024-12-31") == []
 
 
+def test_metrics_tolerate_statements_covering_different_quarters():
+    """Yahoo's three statements do not always cover the same quarters. A
+    period missing from one must not crash the row (it did: KeyError on the
+    cash-flow column), just leave that statement's fields None."""
+    cashflow = CASHFLOW.drop(columns=[pd.Timestamp("2024-09-30")])
+    t = FakeTicker(income=INCOME, balance=BALANCE, cashflow=cashflow, history=bars("2024-09-30"))
+    rows = client_for(t).get_financial_metrics("AAPL", "2024-12-31")
+    latest = rows[0]
+    assert latest.report_period == "2024-09-30"
+    assert latest.free_cash_flow_per_share is None
+    assert latest.gross_margin == pytest.approx(0.4)   # income-statement fields unaffected
+    assert rows[1].free_cash_flow_per_share == pytest.approx(0.5)  # other quarters intact
+
+
 # ---------------------------------------------------------------------------
 # Earnings, facts, market cap, news, insiders
 # ---------------------------------------------------------------------------
